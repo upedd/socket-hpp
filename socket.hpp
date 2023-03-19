@@ -369,7 +369,6 @@ public:
   };
 
   // #TODO check other implementations
-  static constexpr std::size_t DEFAULT_MAX_BUFFER_SIZE = 1024;
   static constexpr int DEFAULT_MAX_BACKLOG = 10;
 
   Socket(int file_descriptor, Family family, Type type, Protocol protocol = Protocol::AUTO) noexcept
@@ -417,47 +416,38 @@ public:
   accept() const noexcept;
 
   template<typename T>
-    requires std::ranges::sized_range<T>
-  [[nodiscard]] inline std::expected<int, Error> send(const T& range, int flags = 0) const noexcept;
+    requires std::ranges::contiguous_range<T> && std::ranges::sized_range<T>
+  [[nodiscard]] inline std::expected<int, Error> receive(T& buffer, int flags = 0) const noexcept;
 
   template<typename T>
-    requires std::ranges::sized_range<T>
+    requires std::ranges::contiguous_range<T> && std::ranges::sized_range<T>
+  [[nodiscard]] inline std::expected<int, Error> send(T& buffer, int flags = 0) const noexcept;
+
+  template<typename T>
+    requires std::ranges::contiguous_range<T> && std::ranges::sized_range<T>
+  [[nodiscard]] inline std::expected<std::pair<int, Socket::Address>, Error>
+  receive_from(T& buffer, int flags = 0) const noexcept;
+
+  template<typename T>
+    requires std::ranges::contiguous_range<T> && std::ranges::sized_range<T>
   [[nodiscard]] inline std::expected<int, Error>
-  send_to(const Socket::Address& address, const T& range, int flags = 0) const noexcept;
+  send_to(const Socket::Address& address, T& buffer, int flags = 0) const noexcept;
 
   template<typename T>
-    requires std::ranges::sized_range<T>
-  [[nodiscard]] inline std::expected<void, Error>
-  send_all(const T& range, int flags = 0) const noexcept;
+    requires std::ranges::contiguous_range<T> && std::ranges::sized_range<T>
+  [[nodiscard]] inline std::expected<int, Error> receive_to_fill(T& buffer, int flags = 0) const noexcept;
 
   template<typename T>
-    requires std::ranges::sized_range<T>
-  [[nodiscard]] inline std::expected<void, Error>
-  send_all_to(const Socket::Address& address, const T& range, int flags = 0) const noexcept;
+    requires std::ranges::contiguous_range<T> && std::ranges::sized_range<T>
+  [[nodiscard]] inline std::expected<int, Error> receive_to_end(
+    T& buffer, size_t chunk_size, int flags = 0
+  ) const noexcept;
 
   template<typename T>
-  [[nodiscard]] inline std::expected<std::vector<T>, Socket::Error>
-  receive(int buffer_size = DEFAULT_MAX_BUFFER_SIZE, int flags = 0) const noexcept;
-
-  template<typename T, size_t size>
-  [[nodiscard]] inline std::expected<int64_t, Socket::Error>
-  receive_into(const std::array<T, size>& buffer, int flags) const noexcept;
-
-  template<typename T>
-  [[nodiscard]] inline std::expected<std::pair<Address, std::vector<T>>, Socket::Error>
-  receive_from(int buffer_size = DEFAULT_MAX_BUFFER_SIZE, int flags = 0) const noexcept;
-
-  template<typename T, size_t size>
-  [[nodiscard]] inline std::expected<std::pair<Address, int64_t>, Socket::Error>
-  receive_from_into(const std::array<T, size>& buffer, int flags) const noexcept;
-
-  template<typename T>
-  [[nodiscard]] inline std::expected<std::vector<T>, Socket::Error>
-  receive_to_end(int buffer_size = DEFAULT_MAX_BUFFER_SIZE, int flags = 0) const noexcept;
-
-  template<typename T>
-  [[nodiscard]] inline std::expected<std::pair<Address, std::vector<T>>, Socket::Error>
-  receive_to_end_from(int buffer_size = DEFAULT_MAX_BUFFER_SIZE, int flags = 0) const noexcept;
+    requires std::ranges::contiguous_range<T> && std::ranges::sized_range<T>
+  [[nodiscard]] inline std::expected<int, Error> send_all(
+    T& buffer, int flags = 0
+  ) const noexcept;
 
   enum class ShutdownType { READ = SHUT_RD, WRITE = SHUT_WR, ALL = SHUT_RDWR };
 
@@ -596,197 +586,6 @@ Socket::accept() const noexcept {
   return { { std::move(accepted_socket), std::move(address) } };
 }
 
-template<typename T>
-  requires std::ranges::sized_range<T>
-inline std::expected<int, Socket::Error> Socket::send(const T& range, int flags) const noexcept {
-  auto data = std::ranges::data(range);
-  uint32_t data_size = std::ranges::size(range);
-
-  int bytes_sent = platform_send(fd_, data, data_size, flags);
-  return make_response_(bytes_sent, bytes_sent);
-}
-
-template<typename T>
-  requires std::ranges::sized_range<T>
-std::expected<int, Socket::Error> inline Socket::send_to(
-  const Socket::Address& address, const T& range, int flags
-) const noexcept {
-  auto data = std::ranges::data(range);
-  uint32_t data_size = std::ranges::size(range);
-
-  int bytes_sent =
-    platform_sendto(fd_, data, data_size, flags, address.get_ptr(), sizeof(sockaddr));
-  return make_response_(bytes_sent, bytes_sent);
-}
-
-
-template<typename T>
-  requires std::ranges::sized_range<T>
-inline std::expected<void, Socket::Error>
-Socket::send_all(const T& range, int flags) const noexcept {
-  auto begin_iter = std::ranges::begin(range);
-  auto end_iter = std::ranges::end(range);
-
-  int64_t total_bytes_sent = 0;
-  int64_t bytes_left = std::ranges::size(range);
-
-  while (total_bytes_sent < bytes_left) {
-    auto response = send(std::ranges::subrange(begin_iter + total_bytes_sent, end_iter), flags);
-    if (!response) {
-      return std::unexpected(response.error());
-    }
-    int64_t bytes_sent = *response;
-
-    total_bytes_sent += bytes_sent;
-    bytes_left -= bytes_sent;
-  }
-
-  return {};
-}
-
-template<typename T>
-  requires std::ranges::sized_range<T>
-inline std::expected<void, Socket::Error>
-Socket::send_all_to(const Socket::Address& address, const T& range, int flags) const noexcept {
-  auto begin_iter = std::ranges::begin(range);
-  auto end_iter = std::ranges::end(range);
-
-  int64_t total_bytes_sent = 0;
-  int64_t bytes_left = std::ranges::size(range);
-
-  while (total_bytes_sent < bytes_left) {
-    auto response =
-      send_to(address, std::ranges::subrange(begin_iter + total_bytes_sent, end_iter), flags);
-    if (!response) {
-      return std::unexpected(response.error());
-    }
-    int64_t bytes_sent = *response;
-
-    total_bytes_sent += bytes_sent;
-    bytes_left -= bytes_sent;
-  }
-
-  return {};
-}
-
-template<typename T>
-inline std::expected<std::vector<T>, Socket::Error>
-Socket::receive(int buffer_size, int flags) const noexcept {
-  std::vector<T> buffer{};
-  buffer.resize(buffer_size);
-
-  size_t buffer_size_in_bytes = buffer_size * sizeof(T);
-  int bytes_received = platform_recv(fd_, buffer.data(), buffer_size_in_bytes, flags);
-
-  // shrink buffer vector to only fit elements we receive
-  // we need to set it to zero in case bytes received is negative because it
-  // failed
-  size_t num_of_elements_received = bytes_received > 0 ? bytes_received / sizeof(T) : 0UL;
-  buffer.resize(num_of_elements_received);
-
-  return make_response_(bytes_received, buffer);
-}
-
-
-template<typename T, size_t size>
-inline std::expected<int64_t, Socket::Error>
-Socket::receive_into(const std::array<T, size>& buffer, int flags) const noexcept {
-  constexpr size_t buffer_size_in_bytes = size * sizeof(T);
-  int bytes_received = platform_recv(fd_, buffer.data(), buffer_size_in_bytes, flags);
-
-  // return num of elements we received
-  return make_response_(bytes_received, bytes_received / sizeof(T));
-}
-
-template<typename T>
-inline std::expected<std::pair<Socket::Address, std::vector<T>>, Socket::Error>
-Socket::receive_from(int buffer_size, int flags) const noexcept {
-  Address address{};
-  std::vector<T> buffer{};
-  buffer.resize(buffer_size);
-
-  size_t buffer_size_in_bytes = buffer_size * sizeof(T);
-  socklen_t storage_size = Socket::Address::get_size();
-
-  int bytes_received = platform_recvfrom(
-    fd_, buffer.data(), buffer_size_in_bytes, flags, address.get_ptr(), &storage_size
-  );
-
-  // shrink buffer vector to only fit elements we received
-  size_t num_of_elements_received = bytes_received > 0 ? bytes_received / sizeof(T) : 0UL;
-  buffer.resize(num_of_elements_received);
-
-  return make_response_(bytes_received, std::make_pair(std::move(address), std::move(buffer)));
-}
-
-
-template<typename T, size_t size>
-inline std::expected<std::pair<Socket::Address, int64_t>, Socket::Error>
-Socket::receive_from_into(const std::array<T, size>& buffer, int flags) const noexcept {
-  constexpr size_t buffer_size_in_bytes = size * sizeof(T);
-
-  Socket::Address address{};
-  socklen_t sock_length = Socket::Address::get_size();
-
-  int bytes_received = platform_recv_from(
-    fd_, buffer.data(), buffer_size_in_bytes, flags, address.get_ptr(), &sock_length
-  );
-
-
-  size_t num_of_elements_received = bytes_received / sizeof(T);
-
-  return make_response_(
-    bytes_received, std::make_pair(std::move(address), num_of_elements_received)
-  );
-}
-
-template<typename T>
-inline std::expected<std::vector<T>, Socket::Error>
-Socket::receive_to_end(int buffer_size, int flags) const noexcept {
-  std::vector<T> result_buffer;
-  while (true) {
-    auto buffer = receive<T>(buffer_size, flags);
-
-    if (!buffer) {
-      return std::unexpected(buffer.error());
-    }
-    // we receive until we get an empty buffer which means there so more data to
-    // read
-    if ((*buffer).size() > 0) {
-      result_buffer.insert(result_buffer.end(), (*buffer).begin(), (*buffer).end());
-    } else {
-      break;
-    }
-  }
-  return result_buffer;
-}
-
-template<typename T>
-inline std::expected<std::pair<Socket::Address, std::vector<T>>, Socket::Error>
-Socket::receive_to_end_from(int buffer_size, int flags) const noexcept {
-  std::vector<T> result_buffer;
-  Socket::Address last_address;
-  while (true) {
-    auto response = receive<T>(buffer_size, flags);
-    if (!response) {
-      return std::unexpected(response.error());
-    }
-
-    auto [buffer, address] = *response;
-    // we receive until we get an empty buffer which means there so more data to
-    // read
-    if (buffer.size() > 0) {
-      result_buffer.insert(result_buffer.end(), buffer.begin(), buffer.end());
-      // we will return the last address we got data from
-      last_address = address;
-    } else {
-      break;
-    }
-  }
-
-  return std::make_pair(std::move(last_address), std::move(result_buffer));
-}
-
 inline std::expected<void, Socket::Error> Socket::close() noexcept {
   if (fd_ != -1) {
     const int status = platform_close(fd_);
@@ -889,6 +688,137 @@ Socket::create(Socket::Family family, Socket::Type type, Socket::Protocol protoc
     return make_unexpected_();
   }
   return Socket{ fd, family, type, protocol };
+}
+template<typename T>
+  requires std::ranges::contiguous_range<T> && std::ranges::sized_range<T>
+inline std::expected<int, Socket::Error> Socket::send_all(T& buffer, int flags) const noexcept {
+  size_t elements_to_sent = std::ranges::size(buffer) * sizeof(std::ranges::range_value_t<T>);
+  size_t elements_sent = 0;
+
+  do {
+      auto subrange = std::ranges::subrange(std::ranges::begin(buffer) + elements_sent, std::ranges::end(buffer));
+      auto sent = send(subrange, flags);
+      if (!sent) {
+        return std::unexpected(sent.error());
+      }
+
+      elements_sent += *sent;
+  } while (elements_sent > elements_to_sent);
+
+  return elements_sent;
+}
+
+template<typename T>
+  requires std::ranges::contiguous_range<T> && std::ranges::sized_range<T>
+inline std::expected<int, Socket::Error> Socket::receive_to_end(T& buffer, size_t chunk_size, int flags)
+  const noexcept {
+  int total_received_elements = 0;
+  int last_received_elements;
+
+  do {
+    // resize buffer
+    if (buffer.size() == buffer.capacity()) {
+      buffer.resize(buffer.capacity() + chunk_size);
+    } else {
+      buffer.resize(buffer.capacity());
+    }
+    auto subrange = std::ranges::subrange(buffer.begin() + total_received_elements, buffer.end());
+    auto received = receive(subrange, flags);
+
+    if (!received) {
+      return std::unexpected(received.error());
+    }
+
+    last_received_elements = *received;
+    total_received_elements += last_received_elements;
+  } while (last_received_elements != 0);
+
+  // shrink buffer to fit
+  buffer.resize(total_received_elements - 1);
+
+  return total_received_elements;
+}
+
+template<typename T>
+  requires std::ranges::contiguous_range<T> && std::ranges::sized_range<T>
+inline std::expected<int, Socket::Error> Socket::receive_to_fill(T& buffer, int flags) const noexcept {
+  int total_received_elements = 0;
+  int last_received_elements = 0;
+
+  do {
+    auto subrange = std::ranges::subrange(buffer.begin() + total_received_elements, buffer.end());
+    auto received = receive(subrange, flags);
+
+    if (!received) {
+      return std::unexpected(received.error());
+    }
+
+    last_received_elements = *received;
+    total_received_elements += last_received_elements;
+  } while (last_received_elements != 0 && total_received_elements < std::ranges::size(buffer));
+
+  return total_received_elements;
+}
+template<typename T>
+  requires std::ranges::contiguous_range<T> && std::ranges::sized_range<T>
+inline std::expected<int, Socket::Error>
+Socket::send_to(const Socket::Address& address, T& buffer, int flags) const noexcept {
+  constexpr size_t element_size = sizeof(std::ranges::range_value_t<T>);
+  size_t buffer_size_in_bytes = std::ranges::size(buffer) * element_size;
+  int bytes_sent = platform_sendto(
+    fd_,
+    std::ranges::data(buffer),
+    buffer_size_in_bytes,
+    flags,
+    address.get_ptr(),
+    sizeof(sockaddr_in6)
+  );
+  // return number of elements sent
+  return make_response_(bytes_sent, bytes_sent / element_size);
+}
+
+
+template<typename T>
+  requires std::ranges::contiguous_range<T> && std::ranges::sized_range<T>
+inline std::expected<std::pair<int, Socket::Address>, Socket::Error>
+Socket::receive_from(T& buffer, int flags) const noexcept {
+  constexpr size_t element_size = sizeof(std::ranges::range_value_t<T>);
+  size_t buffer_size_in_bytes = std::ranges::size(buffer) * element_size;
+
+  Socket::Address address{};
+  socklen_t size = Socket::Address::get_size();
+
+  int bytes_received = platform_recvfrom(
+    fd_, std::ranges::data(buffer), buffer_size_in_bytes, flags, address.get_ptr(), &size
+  );
+
+  int num_of_elements_received = bytes_received / element_size;
+
+  // return num of elements we received
+  return make_response_(
+    bytes_received, std::make_pair(num_of_elements_received, std::move(address))
+  );
+}
+
+template<typename T>
+  requires std::ranges::contiguous_range<T> && std::ranges::sized_range<T>
+inline std::expected<int, Socket::Error> Socket::send(T& buffer, int flags) const noexcept {
+  constexpr size_t element_size = sizeof(std::ranges::range_value_t<T>);
+  size_t buffer_size_in_bytes = std::ranges::size(buffer) * element_size;
+  int bytes_sent = platform_send(fd_, std::ranges::data(buffer), buffer_size_in_bytes, flags);
+  // return number of elements sent
+  return make_response_(bytes_sent, bytes_sent / element_size);
+}
+
+template<typename T>
+  requires std::ranges::contiguous_range<T> && std::ranges::sized_range<T>
+inline std::expected<int, Socket::Error> Socket::receive(T& buffer, int flags) const noexcept {
+  constexpr size_t element_size = sizeof(std::ranges::range_value_t<T>);
+  size_t buffer_size_in_bytes = std::ranges::size(buffer) * element_size;
+  int bytes_received = platform_recv(fd_, std::ranges::data(buffer), buffer_size_in_bytes, flags);
+
+  // return num of elements we received
+  return make_response_(bytes_received, bytes_received / element_size);
 }
 
 template<typename T>
