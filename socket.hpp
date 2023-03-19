@@ -229,7 +229,7 @@ public:
     std::string get_as_string() override {
       std::array<char, INET_ADDRSTRLEN> buffer{};
       platform_ntop(AF_INET, &get_inet_ptr()->sin_addr, buffer.data(), INET_ADDRSTRLEN);
-      return { buffer.data(), buffer.size() };
+      return { buffer.data() };
     }
 
     [[nodiscard]] sockaddr_in* get_inet_ptr() const {
@@ -273,7 +273,7 @@ public:
     std::string get_as_string() override {
       std::array<char, INET6_ADDRSTRLEN> buffer{};
       platform_ntop(AF_INET6, &get_inet6_ptr()->sin6_addr, buffer.data(), INET6_ADDRSTRLEN);
-      return { buffer.data(), buffer.size() };
+      return { buffer.data() };
     }
 
     [[nodiscard]] sockaddr_in6* get_inet6_ptr() const noexcept {
